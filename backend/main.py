@@ -5,21 +5,18 @@ from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
-from typing import Optional
 
 # LangChain imports
-from langchain_community.document_loaders import (
-    TextLoader,
-    PyPDFLoader
-)
-from langchain_community.document_loaders import Docx2txtLoader
+from langchain_community.document_loaders import TextLoader, Docx2txtLoader
 from langchain_text_splitters import CharacterTextSplitter
-from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain_groq import ChatGroq
 from langchain_core.prompts import PromptTemplate
 from langchain_core.runnables import RunnablePassthrough
 from langchain_core.output_parsers import StrOutputParser
+
+# ✅ IMPORTANT: lightweight embeddings
+from langchain_community.embeddings import FastEmbedEmbeddings
 
 load_dotenv()
 
@@ -27,22 +24,15 @@ app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "https://*.vercel.app",
-        "*"
-    ],
+    allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# ============================================
-# Global Storage
-# ============================================
 sessions = {}
 
 # ============================================
-# Lazy Loaded Models (IMPORTANT FIX)
+# Lazy Models (LIGHTWEIGHT)
 # ============================================
 embeddings = None
 llm = None
@@ -51,17 +41,15 @@ def get_models():
     global embeddings, llm
 
     if embeddings is None:
-        print("Loading embeddings model...")
-        embeddings = HuggingFaceEmbeddings(
-            model_name="all-MiniLM-L6-v2"
-        )
+        print("Loading lightweight embeddings...")
+        embeddings = FastEmbedEmbeddings()
 
     if llm is None:
         print("Loading LLM...")
         api_key = os.getenv("GROQ_API_KEY")
 
         if not api_key:
-            raise ValueError("GROQ_API_KEY is missing in environment variables")
+            raise ValueError("GROQ_API_KEY missing")
 
         llm = ChatGroq(
             api_key=api_key,
@@ -71,46 +59,34 @@ def get_models():
     return embeddings, llm
 
 # ============================================
-# Build RAG Chain
+# RAG Chain
 # ============================================
 def build_rag_chain(documents):
     embeddings, llm = get_models()
 
-    splitter = CharacterTextSplitter(
-        chunk_size=500,
-        chunk_overlap=100
-    )
-
+    splitter = CharacterTextSplitter(chunk_size=500, chunk_overlap=100)
     chunks = splitter.split_documents(documents)
 
     vectorstore = FAISS.from_documents(chunks, embeddings)
 
-    retriever = vectorstore.as_retriever(
-        search_kwargs={"k": 3}
-    )
-
-    prompt_template = """
-You are a helpful document assistant.
-Answer using ONLY the context below.
-If answer not in context say exactly:
-"I don't have that information in the uploaded document."
-Keep answer clear and concise.
-
-Context: {context}
-
-Question: {question}
-
-Answer:"""
+    retriever = vectorstore.as_retriever(search_kwargs={"k": 2})  # reduced memory
 
     prompt = PromptTemplate(
-        template=prompt_template,
+        template="""
+You are a helpful assistant.
+Answer ONLY from context.
+
+Context: {context}
+Question: {question}
+Answer:
+""",
         input_variables=["context", "question"]
     )
 
     def format_docs(docs):
         return "\n\n".join(doc.page_content for doc in docs)
 
-    rag_chain = (
+    return (
         {
             "context": retriever | format_docs,
             "question": RunnablePassthrough()
@@ -120,8 +96,6 @@ Answer:"""
         | StrOutputParser()
     )
 
-    return rag_chain
-
 # ============================================
 # API Models
 # ============================================
@@ -129,83 +103,50 @@ class QuestionRequest(BaseModel):
     session_id: str
     question: str
 
-class AnswerResponse(BaseModel):
-    answer: str
-
-class SessionResponse(BaseModel):
-    session_id: str
-    message: str
-
-# ============================================
-# Startup Check
-# ============================================
-@app.on_event("startup")
-def startup_event():
-    print("✅ FastAPI app started successfully")
-
 # ============================================
 # Routes
 # ============================================
 @app.get("/")
 def home():
-    return {"message": "Document RAG API running!"}
-
+    return {"message": "RAG API running"}
 
 @app.post("/upload")
-async def upload_file(file: UploadFile = File(...)):
+async def upload(file: UploadFile = File(...)):
     session_id = str(uuid.uuid4())
 
     suffix = os.path.splitext(file.filename)[1]
 
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-        content = await file.read()
-        tmp.write(content)
-        tmp_path = tmp.name
+        tmp.write(await file.read())
+        path = tmp.name
 
     try:
-        if suffix.lower() == ".pdf":
-            from langchain_community.document_loaders import PyMuPDFLoader
-            loader = PyMuPDFLoader(tmp_path)
-        elif suffix.lower() == ".docx":
-            loader = Docx2txtLoader(tmp_path)
+        if suffix.lower() == ".docx":
+            loader = Docx2txtLoader(path)
         else:
-            loader = TextLoader(tmp_path)
+            loader = TextLoader(path)
 
-        documents = loader.load()
+        docs = loader.load()
 
-        rag_chain = build_rag_chain(documents)
+        sessions[session_id] = build_rag_chain(docs)
 
-        sessions[session_id] = rag_chain
+        os.unlink(path)
 
-        os.unlink(tmp_path)
-
-        return SessionResponse(
-            session_id=session_id,
-            message=f"File '{file.filename}' uploaded successfully!"
-        )
+        return {"session_id": session_id}
 
     except Exception as e:
-        os.unlink(tmp_path)
+        os.unlink(path)
         return {"error": str(e)}
 
-
 @app.post("/ask")
-def ask_question(request: QuestionRequest):
-    if request.session_id not in sessions:
-        return AnswerResponse(
-            answer="Session not found. Please upload a document first."
-        )
+def ask(req: QuestionRequest):
+    if req.session_id not in sessions:
+        return {"answer": "Upload document first"}
 
-    rag_chain = sessions[request.session_id]
-
-    response = rag_chain.invoke(request.question)
-
-    return AnswerResponse(answer=response)
-
+    chain = sessions[req.session_id]
+    return {"answer": chain.invoke(req.question)}
 
 @app.delete("/session/{session_id}")
-def delete_session(session_id: str):
-    if session_id in sessions:
-        del sessions[session_id]
-
-    return {"message": "Session deleted"}
+def delete(session_id: str):
+    sessions.pop(session_id, None)
+    return {"message": "deleted"}
