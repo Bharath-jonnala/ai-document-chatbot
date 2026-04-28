@@ -1,0 +1,31 @@
+Cognizant Company Information
+
+About Cognizant:
+Cognizant is a global technology company founded in 1994. 
+Headquartered in New Jersey, USA. It provides IT services, 
+consulting, and business process services.
+
+Leave Policy:
+Employees get 18 days of paid leave per year.
+Sick leave is 12 days per year.
+Casual leave is 6 days per year.
+Leave must be applied 2 days in advance except emergencies.
+
+Work From Home Policy:
+Employees can work from home 2 days per week.
+Work from home requires manager approval.
+All meetings must be attended online during WFH days.
+
+Salary and Appraisal:
+Appraisals happen every year in April.
+Performance ratings are from 1 to 5.
+Rating 4 and above gets 15% to 20% hike.
+Rating 3 gets 8% to 10% hike.
+Rating below 3 gets no hike.
+
+Ace Team Program:
+Ace Team is Cognizant's most selective engineering program.
+Ace Team engineers start at 12 LPA as Associate level.
+Senior Associate level starts at 18 LPA.
+Ace Team works on AI native projects from day one.
+Engineers build RAG pipelines and agentic workflows.
