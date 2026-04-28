@@ -38,34 +38,53 @@ app.add_middleware(
 
 # ============================================
 # Global Storage
-# session_id -> rag_chain
 # ============================================
 sessions = {}
 
-# Shared embeddings model loaded once
-print("Loading embeddings model...")
-embeddings = HuggingFaceEmbeddings(
-    model_name="all-MiniLM-L6-v2"
-)
+# ============================================
+# Lazy Loaded Models (IMPORTANT FIX)
+# ============================================
+embeddings = None
+llm = None
 
-# Shared LLM
-llm = ChatGroq(
-    api_key=os.getenv("GROQ_API_KEY"),
-    model_name="llama-3.3-70b-versatile"
-)
+def get_models():
+    global embeddings, llm
 
-print("Models ready!")
+    if embeddings is None:
+        print("Loading embeddings model...")
+        embeddings = HuggingFaceEmbeddings(
+            model_name="all-MiniLM-L6-v2"
+        )
+
+    if llm is None:
+        print("Loading LLM...")
+        api_key = os.getenv("GROQ_API_KEY")
+
+        if not api_key:
+            raise ValueError("GROQ_API_KEY is missing in environment variables")
+
+        llm = ChatGroq(
+            api_key=api_key,
+            model_name="llama-3.3-70b-versatile"
+        )
+
+    return embeddings, llm
 
 # ============================================
-# Helper — Build RAG chain from documents
+# Build RAG Chain
 # ============================================
 def build_rag_chain(documents):
+    embeddings, llm = get_models()
+
     splitter = CharacterTextSplitter(
         chunk_size=500,
         chunk_overlap=100
     )
+
     chunks = splitter.split_documents(documents)
+
     vectorstore = FAISS.from_documents(chunks, embeddings)
+
     retriever = vectorstore.as_retriever(
         search_kwargs={"k": 3}
     )
@@ -118,9 +137,15 @@ class SessionResponse(BaseModel):
     message: str
 
 # ============================================
-# API Endpoints
+# Startup Check
 # ============================================
+@app.on_event("startup")
+def startup_event():
+    print("✅ FastAPI app started successfully")
 
+# ============================================
+# Routes
+# ============================================
 @app.get("/")
 def home():
     return {"message": "Document RAG API running!"}
@@ -128,20 +153,15 @@ def home():
 
 @app.post("/upload")
 async def upload_file(file: UploadFile = File(...)):
-    # Generate unique session ID for this chat
     session_id = str(uuid.uuid4())
 
-    # Save uploaded file temporarily
     suffix = os.path.splitext(file.filename)[1]
-    with tempfile.NamedTemporaryFile(
-        delete=False,
-        suffix=suffix
-    ) as tmp:
+
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
         content = await file.read()
         tmp.write(content)
         tmp_path = tmp.name
 
-    # Load document based on file type
     try:
         if suffix.lower() == ".pdf":
             from langchain_community.document_loaders import PyMuPDFLoader
@@ -153,13 +173,10 @@ async def upload_file(file: UploadFile = File(...)):
 
         documents = loader.load()
 
-        # Build RAG chain for this session
         rag_chain = build_rag_chain(documents)
 
-        # Store in sessions
         sessions[session_id] = rag_chain
 
-        # Clean up temp file
         os.unlink(tmp_path)
 
         return SessionResponse(
@@ -174,17 +191,15 @@ async def upload_file(file: UploadFile = File(...)):
 
 @app.post("/ask")
 def ask_question(request: QuestionRequest):
-    # Check session exists
     if request.session_id not in sessions:
         return AnswerResponse(
             answer="Session not found. Please upload a document first."
         )
 
-    # Get RAG chain for this session
     rag_chain = sessions[request.session_id]
 
-    # Run RAG pipeline
     response = rag_chain.invoke(request.question)
+
     return AnswerResponse(answer=response)
 
 
@@ -192,4 +207,5 @@ def ask_question(request: QuestionRequest):
 def delete_session(session_id: str):
     if session_id in sessions:
         del sessions[session_id]
+
     return {"message": "Session deleted"}
